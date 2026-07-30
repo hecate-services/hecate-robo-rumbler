@@ -1,0 +1,20 @@
+{application, hecate_robo_rumbler, [
+    {description, "Robo Rumble rumbler: accepts a visiting tank genome, fights it against the resident field, publishes the row"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        %% The Robo Rumble engine, used as a LIBRARY. Listed here so the modules
+        %% are loadable; the faber_tweann APPLICATION is deliberately not started
+        %% (see the README): the robo_* modules are pure, while that application
+        %% brings up a supervisor and a morphology registry a rumbler has no use
+        %% for.
+        faber_tweann
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/hecate-services/hecate-robo-rumbler"}]}
+]}.
