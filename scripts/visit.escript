@@ -4,8 +4,14 @@
 %% A VISITOR. Sends one tank to a rumbler over the mesh and waits for the row.
 %%
 %% This is the other half of the loop and the first thing a person can actually
-%% run. It joins the same realm, subscribes to the result topic, publishes a
-%% challenge, and prints what comes back.
+%% run. It subscribes to the result topic, publishes a challenge, and prints what
+%% comes back.
+%%
+%% TWO REALMS, AND THE ASYMMETRY IS THE ACCESS CONTROL. A challenge goes out on
+%% the FLEET realm, because submitting work costs a shared 4-core box roughly
+%% thirteen seconds of two cores and should not be open to anyone who reads a
+%% README. The row comes back on the PUBLIC realm, because a published result is
+%% meant to be read by a website. Submitting is gated; reading is not.
 %%
 %% Usage:
 %%   scripts/visit.escript <genome-file> [seconds-to-wait]
@@ -19,13 +25,17 @@ main([Path, WaitS]) ->
     io:format("visitor  : ~p bytes~n", [byte_size(Bytes)]),
     ok = boot(),
     Topic = visit_facts:topic(visit),
+    %% Results arrive on the publish realm, which is not the realm the challenge
+    %% goes out on. Subscribing on the fleet realm here would wait forever while
+    %% the row sailed past on the other one.
+    {ok, Results} = rumble_mesh:publish_realm(realm()),
     %% RETRY, BECAUSE A POOL EXISTING IS NOT A STATION BEING READY. The first
     %% version subscribed once and died on {transient, no_healthy_station}: the
     %% client attaches before any station link is healthy. Exactly the bug just
     %% fixed in the server, not applied here until it bit.
-    ok = retry(fun() -> macula:subscribe(pool(), realm(), Topic, self()) end,
+    ok = retry(fun() -> macula:subscribe(pool(), Results, Topic, self()) end,
                "subscribe", 60),
-    io:format("listening: ~s~n", [Topic]),
+    io:format("listening: ~s on ~s~n", [Topic, binary:encode_hex(Results)]),
     ok = retry(fun() -> macula:publish(pool(), realm(), visit_facts:topic(challenge),
                                        #{type => challenge, genome => Bytes}) end,
                "publish", 60),

@@ -178,6 +178,12 @@ are how this design draws that line, so the facts go out on their own:
     net.beamcampus.rumble
     0a346d25957755075dabefcc88e03c050df86ce3b7dc5a5a63ff38f32462c352
 
+**Challenges come in on the fleet realm; rows go out on the public one, and that
+asymmetry is the access control.** Submitting a tank costs a shared 4-core box
+about thirteen seconds of two cores, so it should not be open to anyone who reads
+a README. Reading a published result should be. Submitting is gated, reading is
+not.
+
 Set `HECATE_RUMBLE_REALM` to that tag. Unset falls back to the fleet realm, so a
 deployment that has not been told about the public realm keeps behaving as it
 did. A **malformed** tag is an error rather than a fallback: falling back on a
