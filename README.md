@@ -167,6 +167,32 @@ disclosure, not an accident: send a tank here and its bytes may be broadcast to
 anyone watching. Said plainly because a visitor cannot infer it from "submit a
 genome, get a row back".
 
+### Rumble facts have their own realm
+
+The service keeps its fleet identity for everything `hecate_om` does, because it
+is a fleet service. But the rumble facts are meant to be read by a **public
+website**, and handing a public web container the fleet realm tag would let
+anything in that container read sentinel sightings and warden facts too. Realms
+are how this design draws that line, so the facts go out on their own:
+
+    net.beamcampus.rumble
+    0a346d25957755075dabefcc88e03c050df86ce3b7dc5a5a63ff38f32462c352
+
+Set `HECATE_RUMBLE_REALM` to that tag. Unset falls back to the fleet realm, so a
+deployment that has not been told about the public realm keeps behaving as it
+did. A **malformed** tag is an error rather than a fallback: falling back on a
+typo would publish public facts onto the operational realm and report success.
+
+It costs nothing to draw this line. macula V2 is realm-per-call, so one pool
+publishes to any realm and this is a second realm, not a second connection. A
+realm id is `sha256` of its name, so a public realm needs no provisioning, and
+its name being public is the point rather than a leak.
+
+Worth stating plainly: stations are realm-agnostic infrastructure, so a realm is
+a routing namespace and not an enforced permission. What this buys is that a
+public web box never holds the fleet tag, not that the fleet tag would be
+refused if it did.
+
 ### Two different limits
 
 The wire format caps what a genome may *be*. The service separately caps what one

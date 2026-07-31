@@ -15,9 +15,21 @@
 %% WHAT THIS DOES NOT DO. No retry, no buffer, no delivery guarantee. A fact that
 %% does not land is gone, and the archive is the durable record. Adding delivery
 %% semantics without a store to back them would be a guarantee that is not one.
+%%
+%% RUMBLE FACTS GO OUT ON THEIR OWN REALM, and that is a boundary rather than a
+%% detail. The service keeps its fleet identity for everything hecate_om does
+%% (capability announcements, health), because it is a fleet service. But the
+%% rumble facts are meant to be read by a public website, and handing a public web
+%% container the fleet realm would let anything in that container read sentinel
+%% sightings and warden facts too. Realms are how this design draws that line.
+%%
+%% It costs nothing to draw, because macula V2 is realm-per-call: one pool
+%% publishes to any realm, so this is a second realm and not a second connection.
+%% A realm id is sha256 of its name, so a public realm needs no provisioning, and
+%% its name being public is the point rather than a leak.
 -module(rumble_mesh).
 
--export([publish/2, subscribe/2, available/0]).
+-export([publish/2, subscribe/2, available/0, publish_realm/1]).
 
 %%==============================================================================
 %% Publishing
@@ -31,7 +43,11 @@ publish(Topic, Fact) when is_map(Fact) ->
     send(Topic, Fact, endpoint()).
 
 send(_Topic, _Fact, {error, _} = E) -> E;
-send(Topic, Fact, {ok, Pool, Realm}) ->
+send(Topic, Fact, {ok, Pool, FleetRealm}) ->
+    send_on(Topic, Fact, Pool, publish_realm(FleetRealm)).
+
+send_on(_Topic, _Fact, _Pool, {error, _} = E) -> E;
+send_on(Topic, Fact, Pool, {ok, Realm}) ->
     %% Wrapped, because an unreachable mesh must never take the caller down with
     %% it. This is the one place a transport error is allowed to be swallowed,
     %% and it is swallowed into a return value rather than into nothing.
@@ -62,6 +78,28 @@ listen(Topic, Sub, {ok, Pool, Realm}) ->
 
 -spec available() -> boolean().
 available() -> element(1, endpoint()) =:= ok.
+
+%% WHERE RUMBLE FACTS GO. `HECATE_RUMBLE_REALM' is a 64-hex realm tag; unset means
+%% the fleet realm, so a deployment that has not been told about the public realm
+%% keeps working exactly as it did rather than silently publishing nowhere.
+%%
+%% A malformed tag is an ERROR, not a fallback. Falling back to the fleet realm on
+%% a typo would publish public facts onto the operational realm and look fine.
+%% The fallback is PASSED IN, already resolved, rather than looked up again here.
+%% The first version called realm/0 a second time, which returns `unavailable'
+%% rather than an error tuple, so an unset variable reached send_on/4 in a shape
+%% it had no clause for. Taking the realm the caller already holds removes both
+%% the second lookup and the mismatch.
+-spec publish_realm(binary()) -> {ok, binary()} | {error, term()}.
+publish_realm(Fallback) -> parse_realm(os:getenv("HECATE_RUMBLE_REALM"), Fallback).
+
+parse_realm(S, _Fallback) when is_list(S), S =/= "" ->
+    decoded(catch binary:decode_hex(unicode:characters_to_binary(S)));
+parse_realm(_Unset, Fallback) ->
+    {ok, Fallback}.
+
+decoded(<<R:32/binary>>) -> {ok, R};
+decoded(_Bad) -> {error, rumble_realm_not_64_hex}.
 
 %% The pool and realm hecate_om wired at boot. Both absent is the ordinary state
 %% before boot and while the mesh is down, so it is a value rather than a crash.
