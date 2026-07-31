@@ -1,26 +1,39 @@
 %% @doc The service: hold the field, hear a visitor, settle the visit.
 %%
+%% THREE RESPONSIBILITIES, SPLIT ON PURPOSE.
+%%
+%%   THIS SERVER owns the field and every write. It answers queries immediately
+%%   and does no arithmetic, so a health check cannot queue behind a battle.
+%%   THE WORKERS run the battle. It is pure integer simulation over immutable
+%%   inputs, so it parallelises safely and needs no state at all.
+%%   THE ARCHIVE is written only from here, so journal ordering is a property of
+%%   this server's mailbox rather than a race between workers.
+%%
+%% WHY NOT SIMPLY A SECOND GEN_SERVER. It would fix the health check and give no
+%% concurrency: a gen_server handles one message at a time, so the second visitor
+%% would queue behind the first exactly as before. That moves the blocking rather
+%% than removing it.
+%%
 %% THE ORDER OF OPERATIONS IS THE DESIGN, and it is not the obvious one.
 %%
-%%   1. ARCHIVE the genome. Before anything else, before the battle, before any
-%%      publish. The archive is why this service exists: a visiting genome is a
-%%      sample from an independently trained population that the research cannot
-%%      otherwise obtain. Everything after this step can fail without losing it.
-%%   2. Settle the visit, which is minutes of arithmetic and cannot fail in a way
-%%      that costs data.
-%%   3. Journal the row, locally and durably.
-%%   4. PUBLISH last, and best-effort. A dark mesh must never cost a sample.
+%%   1. ARCHIVE the genome, here, before a worker exists and before anything is
+%%      judged. A visiting genome is a sample from an independently trained
+%%      population that the research cannot otherwise obtain, so it is the one
+%%      irreplaceable thing and every later step is allowed to fail.
+%%   2. A WORKER settles the visit.
+%%   3. Journal the row, here.
+%%   4. PUBLISH last, best-effort. A dark mesh costs a fact, never a sample.
 %%
-%% Doing it in the tempting order, battle then publish then maybe archive, means a
-%% crash or a full disk between steps loses the one thing that was irreplaceable.
+%% BOUNDED CONCURRENCY, because the work is CPU-bound. Unbounded spawning turns
+%% forty simultaneous visitors into forty processes contending for the same cores
+%% and finishes none of them sooner. The excess QUEUES rather than being refused:
+%% a visitor who waits still gets a row, a visitor who is refused is a sample lost.
 %%
-%% BOOT PUBLISHES THE FIELD, ONCE. Rows carry only a field_id, so a subscriber
-%% needs the manifest to join against. Publishing it per row would haul forty
-%% manifests every visit; publishing it never would make every row unreadable.
-%%
-%% THE FIELD IS VALIDATED AT BOOT AND THE SERVICE REFUSES TO START WITHOUT IT. A
-%% resident that fails the wire contract is a broken build, not a runtime
-%% surprise to discover during someone's visit.
+%% EVERYTHING IS KEYED BY WORKER PID. An earlier draft kept monitor references and
+%% looked a finishing worker up by taking the head of the running set, which would
+%% have completed the WRONG visit whenever two ran at once, answering one caller
+%% with another's row. Exactly this front's recurring failure: no crash, a full
+%% plausible result, about somebody else's contest.
 -module(hecate_robo_rumbler_service).
 
 -behaviour(gen_server).
@@ -32,9 +45,14 @@
     field :: [resident_field:resident()],
     archive_dir :: file:filename_all(),
     sub :: reference() | undefined,
+    %% Worker pid => {MonitorRef, who to answer}. `mesh' when nobody waits.
+    running = #{} :: #{pid() => {reference(), gen_server:from() | mesh}},
+    waiting = [] :: [{gen_server:from() | mesh, binary()}],
+    limit = 1 :: pos_integer(),
     visits = 0 :: non_neg_integer(),
     refused = 0 :: non_neg_integer(),
-    ignored = 0 :: non_neg_integer()
+    ignored = 0 :: non_neg_integer(),
+    crashed = 0 :: non_neg_integer()
 }).
 
 %%==============================================================================
@@ -43,135 +61,185 @@
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% Settle a visit synchronously. Exposed so a visit can be driven without the
-%% mesh, which is how the whole path is tested.
-%%
-%% The timeout is generous because a full row is 6,400 matches. The compute
-%% budget in settle_visits is what stops that becoming unbounded, so this is a
-%% backstop rather than the actual protection.
+%% A full row is 6,400 matches, so the caller waits. It now waits on a WORKER
+%% rather than on the server, which is the whole point of this version.
 -spec settle(binary()) -> {ok, map()} | {error, term()}.
 settle(Bytes) -> gen_server:call(?MODULE, {settle, Bytes}, 300000).
 
+%% THESE ANSWER DURING A BATTLE. In the previous version they queued behind 13
+%% seconds of arithmetic, which is survivable for a script and wrong for a health
+%% endpoint.
 -spec field() -> [resident_field:resident()].
-field() -> gen_server:call(?MODULE, field, 300000).
+field() -> gen_server:call(?MODULE, field).
 
-%% HEAD-OF-LINE BLOCKING IS REAL HERE AND IS NOT YET FIXED. A visit is about 13
-%% seconds of pure CPU inside handle_call, so stats/0 and every other call queue
-%% behind it. That is tolerable for a v1 that settles one visit at a time and it
-%% is NOT tolerable for a health endpoint, which is what this becomes in
-%% production. The timeout below makes the queueing survivable rather than
-%% correct; the actual fix is to settle in a spawned process and reply
-%% asynchronously, which changes the API and is owed.
 -spec stats() -> map().
-stats() -> gen_server:call(?MODULE, stats, 300000).
+stats() -> gen_server:call(?MODULE, stats).
 
 %%==============================================================================
 %% gen_server
 %%==============================================================================
 
-init([]) ->
-    Dir = archive_dir(),
-    started(Dir, resident_field:load()).
+init([]) -> started(archive_dir(), resident_field:load()).
 
 started(_Dir, {error, Why}) -> {stop, {field_unusable, Why}};
 started(Dir, {ok, Field}) ->
     ok = announce(Field),
-    {ok, #state{field = Field, archive_dir = Dir, sub = listen()}}.
+    {ok, #state{field = Field, archive_dir = Dir, sub = listen(), limit = limit()}}.
 
-%% SUBSCRIBE, WHICH THE FIRST VERSION SIMPLY DID NOT DO. It published the field
-%% and then waited for messages it had never asked for, so a visitor could send a
-%% genome and nothing at all would happen: no error, no log, silence. Best-effort
-%% like the publish, because a dark mesh at boot is normal, and the reference is
+%% Best-effort like the publish: a dark mesh at boot is normal. The reference is
 %% kept so a dropped subscription is recognisable rather than merely quiet.
-listen() ->
-    subscribed(rumble_mesh:subscribe(visit_facts:topic(challenge), self())).
+listen() -> subscribed(rumble_mesh:subscribe(visit_facts:topic(challenge), self())).
 
 subscribed({ok, Ref}) -> Ref;
 subscribed({error, _Why}) -> undefined.
 
-%% The manifest, best-effort. A dark mesh at boot is normal and must not stop the
-%% service: visits still settle and still archive, and the field is re-announced
-%% the next time the service starts.
 announce(Field) ->
-    Fact = visit_facts:field_published(Field),
-    _ = rumble_mesh:publish(visit_facts:topic(field), Fact),
+    _ = rumble_mesh:publish(visit_facts:topic(field), visit_facts:field_published(Field)),
     ok.
 
-handle_call({settle, Bytes}, _From, State) ->
-    {Reply, State2} = visit(Bytes, State),
-    {reply, Reply, State2};
-handle_call(field, _From, State) ->
-    {reply, State#state.field, State};
-handle_call(stats, _From, State) ->
-    {reply, #{residents => length(State#state.field),
-              visits => State#state.visits,
-              refused => State#state.refused,
-              ignored => State#state.ignored,
-              archived => visit_archive:genome_count(State#state.archive_dir),
-              journal => visit_archive:journal_count(State#state.archive_dir),
-              mesh => rumble_mesh:available(),
-              %% A live subscription is the difference between a service that can
-              %% hear a visitor and one that only looks like it can.
-              subscribed => State#state.sub =/= undefined}, State};
+%% CPU-bound, so the natural cap is the scheduler count. Overridable because a
+%% host sharing cores with other services will want fewer.
+limit() -> configured_limit(os:getenv("HECATE_RUMBLE_CONCURRENCY")).
+
+configured_limit(S) when is_list(S), S =/= "" -> max(1, list_to_integer(S));
+configured_limit(_Unset) -> erlang:system_info(schedulers_online).
+
+handle_call({settle, Bytes}, From, State) -> {noreply, accept(From, Bytes, State)};
+handle_call(field, _From, State) -> {reply, State#state.field, State};
+handle_call(stats, _From, State) -> {reply, snapshot(State), State};
 handle_call(_Other, _From, State) -> {reply, {error, unknown_call}, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
-%% A CHALLENGE ARRIVING OVER THE MESH. The shape is macula's own:
-%% {macula_event, SubRef, Topic, Payload, Meta}. The first version matched
-%% {macula, Topic, Bytes}, which macula never sends, so every challenge would have
-%% fallen through to the catch-all and been discarded in silence. The shape is
-%% taken from macula_client.erl:924 rather than assumed.
-%%
-%% Fire and forget from the sender's view: the row comes back as a published fact,
-%% not as a reply, because the sender may be long gone by the time 6,400 matches
-%% are finished.
+%% A challenge arriving over the mesh. The shape is macula's own,
+%% {macula_event, SubRef, Topic, Payload, Meta} (macula_client.erl:924), taken
+%% from that source rather than assumed: an earlier version matched a shape macula
+%% never sends and would have discarded every challenge in silence.
 handle_info({macula_event, _Ref, _Topic, Payload, _Meta}, State) ->
     {noreply, challenged(Payload, State)};
 
-%% THE SUBSCRIPTION DIED. Without this the service keeps running, looks healthy,
-%% and receives nothing ever again, which is the quietest possible failure. There
-%% is no resubscribe loop yet and that is stated rather than implied: the count is
-%% surfaced in stats/0 so a dead subscription is visible from outside.
+%% A dropped subscription is the quietest failure available: the service keeps
+%% running, looks healthy, and never hears anything again.
 handle_info({macula_event_gone, _Ref, _Reason}, State) ->
     {noreply, State#state{sub = undefined}};
 
-handle_info(_Other, State) ->
-    {noreply, State#state{ignored = State#state.ignored + 1}}.
+%% A worker finished. THE WRITES HAPPEN HERE, never in the worker.
+handle_info({settled, Pid, Result}, State) -> {noreply, finish(Pid, Result, State)};
+
+%% A worker died. Answering is not optional: a caller blocked for five minutes on
+%% a crashed battle is worse than an error.
+handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
+    {noreply, died(Pid, Reason, State)};
+
+handle_info(_Other, State) -> {noreply, State#state{ignored = State#state.ignored + 1}}.
+
+%%==============================================================================
+%% Admitting a visit
+%%==============================================================================
 
 %% THE CHALLENGE SHAPE IS A MAP, matching the facts this service publishes, so a
-%% visitor can add fields later without the meaning of the message changing.
-%% Anything else is counted rather than guessed at: accepting a bare binary too
-%% would mean two shapes with one meaning, which is how a contract stops being one.
+%% visitor can add fields later without changing what the message means. Anything
+%% else is counted rather than guessed at: accepting a bare binary as well would
+%% mean two shapes with one meaning.
 challenged(#{type := challenge, genome := Bytes}, State) when is_binary(Bytes) ->
-    element(2, visit(Bytes, State));
-challenged(_Other, State) ->
-    State#state{ignored = State#state.ignored + 1}.
+    accept(mesh, Bytes, State);
+challenged(_Other, State) -> State#state{ignored = State#state.ignored + 1}.
 
-%%==============================================================================
-%% One visit, in the order that cannot lose a sample
-%%==============================================================================
-
-visit(Bytes, State) when is_binary(Bytes) ->
-    %% STEP 1, AND IT IS FIRST FOR A REASON. Archived before it is judged, so
-    %% even a genome the service goes on to REFUSE is kept: a refusal is itself
-    %% information about what people are sending, and the bytes cost 577.
+accept(Who, Bytes, State) when is_binary(Bytes) ->
+    %% STEP 1, AND IT IS FIRST FOR A REASON. On disk before it is judged, so even
+    %% a genome this service goes on to REFUSE is kept: a refusal is information
+    %% about what people send, and the bytes cost 577.
     _ = visit_archive:put_genome(State#state.archive_dir, Bytes),
-    settled(Bytes, State, settle_visits:settle(Bytes, State#state.field));
-visit(_NotBytes, State) ->
-    {{error, not_a_binary}, State#state{refused = State#state.refused + 1}}.
+    dispatch(Who, Bytes, State);
+accept(Who, _NotBytes, State) ->
+    answer(Who, {error, not_a_binary}),
+    State#state{refused = State#state.refused + 1}.
 
-settled(_Bytes, State, {error, _Why} = E) ->
-    {E, State#state{refused = State#state.refused + 1}};
-settled(_Bytes, State, {ok, Row}) ->
+%% At the cap the work QUEUES. Refusing would be cheaper and would throw away a
+%% sample, which is the one thing this service exists not to do.
+dispatch(Who, Bytes, #state{running = R, limit = L} = State) when map_size(R) >= L ->
+    State#state{waiting = State#state.waiting ++ [{Who, Bytes}]};
+dispatch(Who, Bytes, State) ->
+    {Pid, Ref} = spawn_worker(Bytes, State#state.field),
+    State#state{running = maps:put(Pid, {Ref, Who}, State#state.running)}.
+
+%% THE WORKER IS PURE. No state, no disk, no publishing: immutable inputs in, one
+%% message out. That is what makes running several at once safe, and it is why
+%% the archive writes stayed behind in the server.
+spawn_worker(Bytes, Field) ->
+    Parent = self(),
+    spawn_monitor(fun() -> Parent ! {settled, self(), settle_visits:settle(Bytes, Field)} end).
+
+%%==============================================================================
+%% Finishing
+%%==============================================================================
+
+finish(Pid, Result, #state{running = R} = State) ->
+    completed(maps:get(Pid, R, undefined), Pid, Result, State).
+
+%% Not ours, or already finished. Neither is an error.
+completed(undefined, _Pid, _Result, State) -> State;
+completed({Ref, Who}, Pid, Result, #state{running = R} = State) ->
+    %% Demonitor with flush, so the DOWN that follows a normal exit never arrives
+    %% to be mistaken for a crash.
+    true = erlang:demonitor(Ref, [flush]),
+    {Reply, State2} = record(Result, State),
+    answer(Who, Reply),
+    next(State2#state{running = maps:remove(Pid, R)}).
+
+%% STEP 3 AND 4, both here and in this order: durable locally, then best-effort
+%% outward.
+%%
+%% THE CALLER IS ANSWERED WITH THE FACT, NOT THE INTERNAL ROW. They are different
+%% shapes and only one of them is a contract. The first version of this refactor
+%% returned the row, so a caller silently began receiving a different structure
+%% than the mesh does. A test caught it; nothing else would have.
+record({error, _Why} = E, State) -> {E, State#state{refused = State#state.refused + 1}};
+record({ok, Row}, State) ->
     Fact = visit_facts:visit_settled(Row, State#state.field),
-    %% STEP 3 before STEP 4: durable locally, then best-effort outward.
     _ = visit_archive:append(State#state.archive_dir, {visit, Fact}),
     _ = rumble_mesh:publish(visit_facts:topic(visit), Fact),
     {{ok, Fact}, State#state{visits = State#state.visits + 1}}.
 
-archive_dir() ->
-    case os:getenv("HECATE_RUMBLE_ARCHIVE") of
-        D when is_list(D), D =/= "" -> D;
-        _Unset -> filename:join(["/var", "lib", "hecate-robo-rumbler"])
-    end.
+died(Pid, Reason, #state{running = R} = State) ->
+    dead(maps:get(Pid, R, undefined), Pid, Reason, State).
+
+dead(undefined, _Pid, _Reason, State) -> State;
+dead({_Ref, Who}, Pid, Reason, #state{running = R} = State) ->
+    answer(Who, {error, {battle_crashed, Reason}}),
+    next(State#state{running = maps:remove(Pid, R),
+                     crashed = State#state.crashed + 1}).
+
+next(#state{waiting = []} = State) -> State;
+next(#state{waiting = [{Who, Bytes} | Rest]} = State) ->
+    dispatch(Who, Bytes, State#state{waiting = Rest}).
+
+answer(mesh, _Result) -> ok;
+answer(From, Result) -> gen_server:reply(From, Result).
+
+%%==============================================================================
+%% Reporting
+%%==============================================================================
+
+snapshot(State) ->
+    #{residents => length(State#state.field),
+      visits => State#state.visits,
+      refused => State#state.refused,
+      ignored => State#state.ignored,
+      crashed => State#state.crashed,
+      running => map_size(State#state.running),
+      %% WHICH battles, not merely how many. An operator watching a wedged visit
+      %% needs the pid to inspect, and a test needs it to exercise the crash path
+      %% precisely instead of killing whatever happens to be nearby.
+      running_pids => maps:keys(State#state.running),
+      waiting => length(State#state.waiting),
+      concurrency_limit => State#state.limit,
+      archived => visit_archive:genome_count(State#state.archive_dir),
+      journal => visit_archive:journal_count(State#state.archive_dir),
+      mesh => rumble_mesh:available(),
+      subscribed => State#state.sub =/= undefined}.
+
+archive_dir() -> configured_dir(os:getenv("HECATE_RUMBLE_ARCHIVE")).
+
+configured_dir(D) when is_list(D), D =/= "" -> D;
+configured_dir(_Unset) -> filename:join(["/var", "lib", "hecate-robo-rumbler"]).

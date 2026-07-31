@@ -57,6 +57,17 @@ its place at ranked visits, and there is no ranking here yet.
 Done since: the archive (content-addressed, append-only, self-verifying on read),
 the published facts as an explicit flat schema, and a per-visit compute budget.
 
+### Concurrency
+
+The server owns the field and every write and does no arithmetic, so a health
+check answers during a battle. Battles run in spawned workers, which are pure and
+therefore safe to run several at a time, bounded by the scheduler count. Excess
+visits QUEUE rather than being refused, because a visitor who waits still gets a
+row and a visitor who is refused is a sample lost.
+
+A second gen_server would have fixed the health check and given no concurrency:
+one message at a time means the second visitor still queues behind the first.
+
 The mesh is wired: `hecate_om:boot/2` supplies the pool and realm, the manifest is
 published once at boot, and a genome arriving on the topic settles a visit.
 

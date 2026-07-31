@@ -80,10 +80,11 @@ a_real_macula_event_is_handled(Dir) ->
     hecate_robo_rumbler_service !
         {macula_event, make_ref(), <<"rumble-scratch/challenge">>,
          #{type => challenge, genome => P}, #{}},
-    %% stats/0 is a call, so it queues behind the visit and returning proves the
-    %% visit finished rather than merely that the message was accepted.
-    After = maps:get(visits, hecate_robo_rumbler_service:stats()),
-    ?assertEqual(Before + 1, After),
+    %% A mesh-delivered visit is now genuinely ASYNCHRONOUS: a worker runs it and
+    %% nobody is waiting. So this waits for the count to move rather than reading
+    %% it immediately, which used to work only because the server blocked.
+    ?assertEqual(ok, until(fun() ->
+        maps:get(visits, hecate_robo_rumbler_service:stats()) >= Before + 1 end)),
     ?assert(visit_archive:has_genome(Dir, robo_genome:id(P))).
 
 %% A payload that is not a challenge is COUNTED, not guessed at. Accepting a bare
@@ -102,3 +103,87 @@ a_wrong_shaped_payload_is_counted_not_guessed_at() ->
 a_dead_subscription_is_visible() ->
     hecate_robo_rumbler_service ! {macula_event_gone, make_ref(), pool_closed},
     ?assertEqual(false, maps:get(subscribed, hecate_robo_rumbler_service:stats())).
+
+%%==============================================================================
+%% The worker split: what it is actually for
+%%==============================================================================
+
+worker_split_test_() ->
+    {setup, fun setup/0, fun cleanup/1, fun(_Dir) ->
+        [{timeout, 120, ?_test(queries_answer_during_a_battle())},
+         {timeout, 300, ?_test(two_visits_overlap())},
+         ?_test(a_crashed_worker_answers_its_caller())]
+    end}.
+
+%% THE POINT OF THE WHOLE CHANGE. Previously stats/0 queued behind 13 seconds of
+%% arithmetic in handle_call, so a health check during a visit timed out. It must
+%% now answer promptly WHILE a battle is running, and report the battle.
+queries_answer_during_a_battle() ->
+    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
+    Caller = self(),
+    spawn(fun() -> Caller ! {done, hecate_robo_rumbler_service:settle(P)} end),
+    timer:sleep(500),
+    T0 = erlang:monotonic_time(millisecond),
+    S = hecate_robo_rumbler_service:stats(),
+    Elapsed = erlang:monotonic_time(millisecond) - T0,
+    %% Answered promptly, not after the battle finished.
+    ?assert(Elapsed < 1000),
+    %% And it can see the battle it did not block on.
+    ?assert(maps:get(running, S) >= 1),
+    receive {done, {ok, _}} -> ok after 120000 -> error(visit_never_finished) end.
+
+%% CONCURRENCY, not merely responsiveness. A second gen_server would have fixed
+%% the health check and still serialised the battles. Two visits must overlap, so
+%% together they take materially less than twice one.
+two_visits_overlap() ->
+    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
+    ?assert(maps:get(concurrency_limit, hecate_robo_rumbler_service:stats()) >= 2),
+    One = timed(fun() -> hecate_robo_rumbler_service:settle(P) end),
+    Two = timed(fun() -> pmap(2, fun() -> hecate_robo_rumbler_service:settle(P) end) end),
+    %% Serialised would be about 2x. Overlapping is well under.
+    ?assert(Two < One * 17 div 10).
+
+%% A caller blocked for five minutes on a crashed battle is worse than an error,
+%% so a dying worker must answer. Driven by killing the worker the service
+%% spawned, which is the only way to exercise the DOWN path honestly.
+a_crashed_worker_answers_its_caller() ->
+    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
+    Caller = self(),
+    spawn(fun() -> Caller ! {result, hecate_robo_rumbler_service:settle(P)} end),
+    timer:sleep(300),
+    kill_a_worker(),
+    receive
+        {result, {error, {battle_crashed, _}}} -> ok;
+        %% A race is acceptable: if the battle finished first there was nothing to
+        %% kill, and the caller was answered either way, which is the property.
+        {result, {ok, _}} -> ok
+    after 120000 -> error(caller_was_never_answered)
+    end.
+
+%% KILLS THE ACTUAL WORKER, by asking the service which pids are running. The
+%% first version killed everything LINKED to the service, and spawn_monitor does
+%% not link, so it killed whatever unrelated process happened to be there: the
+%% eunit runner. A test that takes out its own harness is not a test.
+kill_a_worker() ->
+    [exit(P, kill) || P <- maps:get(running_pids, hecate_robo_rumbler_service:stats())],
+    ok.
+
+%% Poll rather than sleep a fixed time: a fixed sleep is either flaky or slow, and
+%% on a loaded machine it is both.
+until(F) -> until(F, 600).
+
+until(_F, 0) -> timeout;
+until(F, N) -> settled_yet(F, N, F()).
+
+settled_yet(_F, _N, true) -> ok;
+settled_yet(F, N, false) -> timer:sleep(200), until(F, N - 1).
+
+timed(F) ->
+    T0 = erlang:monotonic_time(millisecond),
+    _ = F(),
+    erlang:monotonic_time(millisecond) - T0.
+
+pmap(N, F) ->
+    Me = self(),
+    Pids = [spawn(fun() -> Me ! {self(), F()} end) || _ <- lists:seq(1, N)],
+    [receive {P, R} -> R after 300000 -> error(timeout) end || P <- Pids].
