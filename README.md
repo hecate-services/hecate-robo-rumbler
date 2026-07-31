@@ -54,11 +54,29 @@ in a README is a qualifier nobody sees.
 a scratch topic. Storeless: the plan's own tier table says an embedded store earns
 its place at ranked visits, and there is no ranking here yet.
 
-Owed next, in order: archive every visiting genome from the first visit (a row
-keyed by a content id whose preimage nobody kept is a receipt for a sample thrown
-away), define the published fact as an explicit flat schema rather than an internal
-map, and name a per-battle compute budget before a legal maximum-size genome finds
-the gap.
+Done since: the archive (content-addressed, append-only, self-verifying on read),
+the published facts as an explicit flat schema, and a per-visit compute budget.
+
+Owed next: the mesh wiring itself, which is now the smallest remaining piece.
+
+### Two facts
+
+`field_published` carries the manifest, once per field version: every resident id,
+arm and seed, plus a `field_id` derived by hashing the sorted resident ids.
+
+`visit_settled` carries the row and four identities that make it reconstructible
+later: which engine, which wire format, which field, which start set. Rows carry
+only the `field_id` and a reader joins, so a row never hauls forty manifests.
+
+No tuples on the wire, atom keys only, ids as hex. Each of those is a rule earned
+by something that broke elsewhere.
+
+### Two different limits
+
+The wire format caps what a genome may *be*. The service separately caps what one
+visit may *cost*, because the format cannot know the field size or the start set.
+A 2,305-weight genome is comfortably legal and would spend 14.7 million weight
+evaluations on a full row, so it is refused with the arithmetic in the reason.
 
 ## Build
 

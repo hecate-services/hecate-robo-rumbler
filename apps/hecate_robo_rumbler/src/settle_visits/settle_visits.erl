@@ -33,6 +33,11 @@
 %% robo_sim's own cap. A battle reaching it ended by exhaustion, not by a kill.
 -define(TURN_CAP, 2000).
 
+%% Weight-evaluations a single visit may cost: weights x residents x starts x
+%% seats. The measured reference is 281 x 40 x 80 x 2 = 1,798,400 for about 13
+%% seconds, so this allows roughly four times a champion-sized visitor.
+-define(VISIT_BUDGET, 8000000).
+
 %%==============================================================================
 %% The visit
 %%==============================================================================
@@ -47,7 +52,36 @@ settle(_NotBytes, _Field) -> {error, not_a_binary}.
 
 play({error, Why}, _Bytes, _Field) -> {error, {rejected, Why}};
 play({ok, _G}, _Bytes, []) -> {error, empty_field};
-play({ok, G}, Bytes, Field) ->
+play({ok, G}, Bytes, Field) -> budgeted(G, Bytes, Field, affordable(G, Field)).
+
+%% A SERVICE POLICY, DISTINCT FROM THE FORMAT'S LIMIT, and the two exist for
+%% different reasons. robo_genome's MAX_WEIGHTS bounds what is a legal genome at
+%% all. This bounds what THIS HOST is willing to spend on one visit, which the
+%% format cannot know because it depends on the field size and the start set.
+%%
+%% The arithmetic, from measurement rather than taste. A 281-weight champion
+%% against 40 residents over 80 starts in both seats is 6,400 matches and about 13
+%% seconds. Cost is linear in weight count, so the format's legal maximum of
+%% 65,536 weights is 233x that: roughly fifty minutes for one visitor, from a
+%% frame that passes every validation. That is the gap between "a legal genome"
+%% and "a genome this host will run", and nothing else closes it.
+%%
+%% The bound is expressed in the quantity that actually varies, so it does not
+%% silently stop meaning anything when the field grows or the start set changes.
+budgeted(G, Bytes, Field, ok) -> row(G, Bytes, Field);
+budgeted(_G, _Bytes, _Field, {error, _} = E) -> E.
+
+affordable({Layers, _W} = G, Field) ->
+    Cost = robo_genome:weight_count(Layers) * length(Field)
+        * length(robo_starts:split(heldout)) * 2,
+    within(G, Cost, Cost =< ?VISIT_BUDGET).
+
+within(_G, _Cost, true) -> ok;
+within({Layers, _W}, Cost, false) ->
+    {error, {rejected, {over_visit_budget, Cost, ?VISIT_BUDGET,
+                        robo_genome:weight_count(Layers)}}}.
+
+row(G, Bytes, Field) ->
     Duels = [duel(G, R) || R <- Field],
     {ok, #{challenger => challenger(G, Bytes),
            field => resident_field:provenance(Field),

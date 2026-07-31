@@ -118,3 +118,31 @@ sample() -> lists:sublist(robo_starts:split(heldout), ?SAMPLE).
 by_seed(Seed, Field) -> hd([R || #{seed := S} = R <- Field, S =:= Seed]).
 
 genome(#{genome := G}) -> G.
+
+%%==============================================================================
+%% The compute budget
+%%==============================================================================
+
+%% A GENOME CAN BE PERFECTLY LEGAL AND STILL UNAFFORDABLE. The format's cap says
+%% what a genome may be; this says what this host will spend on one visit, which
+%% the format cannot know because it depends on the field size and the start set.
+%% Without it a frame that passes every validation costs roughly fifty minutes.
+oversized_but_legal_genome_is_refused_test() ->
+    {ok, Field} = field(),
+    %% 2,305 weights: comfortably inside the format cap of 65,536, and 14.7M
+    %% weight-evaluations for a full row against a 40-strong field, which is not.
+    Big = [robo_pilot:inputs(), 100, robo_pilot:outputs()],
+    N = robo_net:weight_count(Big),
+    %% Legal by the wire format.
+    ?assertMatch({ok, _}, robo_genome:validate({Big, lists:duplicate(N, 0)})),
+    %% And refused by the service, with the arithmetic in the reason.
+    ?assertMatch({error, {rejected, {over_visit_budget, _Cost, _Budget, N}}},
+                 settle_visits:settle(robo_genome:pack({Big, lists:duplicate(N, 0)}),
+                                      Field)).
+
+%% The residents themselves must be affordable, or the service ships unable to
+%% run its own field.
+every_resident_is_within_the_budget_test() ->
+    {ok, Field} = field(),
+    [?assertMatch({ok, _}, settle_visits:settle(P, [hd(Field)]))
+     || #{packed := P} <- lists:sublist(Field, 3)].
