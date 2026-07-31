@@ -31,6 +31,11 @@ COPY apps ./apps
 RUN rebar3 as prod release
 
 FROM docker.io/alpine:3.22
+# LINKS THE PACKAGE TO THE REPO. Without it a ghcr package is an orphan: it does
+# not appear on the repo page and does not follow the repo's visibility. Every
+# deployed sibling here is public and this one was not, which cost a failed
+# deploy on beam03 with a bare "unauthorized" from the pull.
+LABEL org.opencontainers.image.source="https://github.com/hecate-services/hecate-robo-rumbler"
 RUN apk add --no-cache ncurses-libs libstdc++ libgcc openssl ca-certificates curl
 WORKDIR /app
 COPY --from=builder /build/_build/prod/rel/hecate_robo_rumbler ./

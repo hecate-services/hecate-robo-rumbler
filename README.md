@@ -50,25 +50,31 @@ in a README is a qualifier nobody sees.
 
 ## It works
 
-First live rumble, 2026-07-31, over the deployed mesh via
-`station-de-frankfurt.macula.io`:
+First correct rumble, 2026-07-31. Visitor on a laptop, rumbler in a container on
+**beam03**, meeting only through the deployed mesh:
 
-    visitor  : 577 bytes
-    listening: rumble-scratch/visit
-    sent     : rumble-scratch/challenge
+    laptop -> station-de-frankfurt -> ... mesh ... -> station-fi-helsinki -> beam03
 
     === ROW ===
     opponents : 40
     matches   : 6400
-    won       : 2400
-    lost      : 3840
-    drawn     : 160
-    turn-cap  : 0
+    won       : 2250
+    lost      : 4126
+    drawn     : 24
+    turn-cap  : 5
 
-The 160 draws are the internal check: the visitor was resident 2001, so it meets
-itself once in the field and every one of those 160 matches must draw. And
-turn-cap 0 across 6,400 matches is the measured start set earning its place, since
-the geometry it replaced produced censored stalemates in 70 percent of matches.
+**An earlier row published from a laptop-only run is withdrawn.** It reported 2400
+won, 3840 lost, 160 drawn and zero turn-caps, and it was measured on the wrong
+geometry: that build's engine dependency was stale and silently ignored the
+placement option, so every duel ran on the circle rather than the 80 measured
+starts. The tell was in the numbers and was read backwards at the time. Zero
+turn-caps across 6,400 matches is not a clean sheet, it is the signature of one
+head-on start replayed 6,400 times.
+
+**Determinism across machines is confirmed, empirically.** The same fully
+specified battle produces a byte-identical trace hash and turn count on OTP 28
+here and OTP 27 in the container: `F08A7A749BB584287B5673EEF9BED81E…`, 134 turns.
+That is the property `exp068` was written to measure, answered in the field.
 
 Send one yourself:
 

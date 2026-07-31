@@ -57,16 +57,31 @@ stronger_beats_weaker_and_the_inverse_holds_test() ->
     ?assertEqual(maps:get(losses, Fwd), maps:get(wins, Rev)),
     ?assert(maps:get(wins, Fwd) > maps:get(losses, Fwd)).
 
-%% THE STRONGEST CHECK IN THIS FILE. A genome against itself is a mirror match:
-%% neither side can out-fight the other, so every match must draw. A misread seat
-%% cannot produce this, it produces a sweep.
-self_match_is_all_draws_test() ->
+%% THE STRONGEST CHECK IN THIS FILE, AND THE FIRST VERSION OF IT WAS MEASURING
+%% THE WRONG THING. It asserted a self-match is ALL DRAWS, which passed and was an
+%% artifact: the engine dependency was stale, silently ignored the placement
+%% option, and ran every duel on the circle. Two entrants on a circle are exactly
+%% symmetric, so identical genomes could only draw. The test was evidence that the
+%% geometry was symmetric, not that the seats were read correctly.
+%%
+%% On the real asymmetric start set the invariant is BALANCE, not draws. Each start
+%% is played from both seats, and the two seats are the same battle with the labels
+%% swapped: whoever wins from position one wins in both, so the challenger takes
+%% exactly one win and one loss per start. Measured: 8 wins, 8 losses, 0 draws over
+%% 16 matches.
+%%
+%% It still catches the failure it was written for. A misread seat gives 16-0 or
+%% 0-16, never a balance, and unlike the old version it cannot be satisfied by an
+%% accidentally symmetric geometry.
+self_match_is_exactly_balanced_test() ->
     {ok, Field} = field(),
     A = by_seed(2001, Field),
     D = settle_visits:duel(genome(A), A, sample()),
-    ?assertEqual(0, maps:get(wins, D)),
-    ?assertEqual(0, maps:get(losses, D)),
-    ?assertEqual(maps:get(matches, D), maps:get(draws, D)).
+    ?assertEqual(maps:get(wins, D), maps:get(losses, D)),
+    ?assertEqual(maps:get(matches, D),
+                 maps:get(wins, D) + maps:get(losses, D) + maps:get(draws, D)),
+    %% Not vacuous: a genome that never fought would also balance at zero.
+    ?assert(maps:get(wins, D) > 0).
 
 %% Both seats of every start, so a seat advantage cannot read as skill.
 every_start_is_played_from_both_seats_test() ->
