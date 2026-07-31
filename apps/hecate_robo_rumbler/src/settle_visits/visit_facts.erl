@@ -45,11 +45,14 @@
 %% A SCRATCH NAMESPACE UNTIL SOMEONE DECIDES OTHERWISE. Publishing is visible to
 %% whatever is subscribed, so the default is deliberately not a shared society
 %% feed. Override with HECATE_RUMBLE_NS.
--spec topic(field | visit) -> binary().
+-spec topic(field | visit | challenge) -> binary().
 topic(What) -> <<(namespace())/binary, "/", (leaf(What))/binary>>.
 
 leaf(field) -> <<"field">>;
-leaf(visit) -> <<"visit">>.
+leaf(visit) -> <<"visit">>;
+%% Where a visitor sends a tank. Separate from where results go, so a subscriber
+%% wanting results does not also receive every challenge.
+leaf(challenge) -> <<"challenge">>.
 
 namespace() ->
     case os:getenv("HECATE_RUMBLE_NS") of

@@ -31,8 +31,10 @@
 -record(state, {
     field :: [resident_field:resident()],
     archive_dir :: file:filename_all(),
+    sub :: reference() | undefined,
     visits = 0 :: non_neg_integer(),
-    refused = 0 :: non_neg_integer()
+    refused = 0 :: non_neg_integer(),
+    ignored = 0 :: non_neg_integer()
 }).
 
 %%==============================================================================
@@ -51,10 +53,17 @@ start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 settle(Bytes) -> gen_server:call(?MODULE, {settle, Bytes}, 300000).
 
 -spec field() -> [resident_field:resident()].
-field() -> gen_server:call(?MODULE, field).
+field() -> gen_server:call(?MODULE, field, 300000).
 
+%% HEAD-OF-LINE BLOCKING IS REAL HERE AND IS NOT YET FIXED. A visit is about 13
+%% seconds of pure CPU inside handle_call, so stats/0 and every other call queue
+%% behind it. That is tolerable for a v1 that settles one visit at a time and it
+%% is NOT tolerable for a health endpoint, which is what this becomes in
+%% production. The timeout below makes the queueing survivable rather than
+%% correct; the actual fix is to settle in a spawned process and reply
+%% asynchronously, which changes the API and is owed.
 -spec stats() -> map().
-stats() -> gen_server:call(?MODULE, stats).
+stats() -> gen_server:call(?MODULE, stats, 300000).
 
 %%==============================================================================
 %% gen_server
@@ -67,7 +76,18 @@ init([]) ->
 started(_Dir, {error, Why}) -> {stop, {field_unusable, Why}};
 started(Dir, {ok, Field}) ->
     ok = announce(Field),
-    {ok, #state{field = Field, archive_dir = Dir}}.
+    {ok, #state{field = Field, archive_dir = Dir, sub = listen()}}.
+
+%% SUBSCRIBE, WHICH THE FIRST VERSION SIMPLY DID NOT DO. It published the field
+%% and then waited for messages it had never asked for, so a visitor could send a
+%% genome and nothing at all would happen: no error, no log, silence. Best-effort
+%% like the publish, because a dark mesh at boot is normal, and the reference is
+%% kept so a dropped subscription is recognisable rather than merely quiet.
+listen() ->
+    subscribed(rumble_mesh:subscribe(visit_facts:topic(challenge), self())).
+
+subscribed({ok, Ref}) -> Ref;
+subscribed({error, _Why}) -> undefined.
 
 %% The manifest, best-effort. A dark mesh at boot is normal and must not stop the
 %% service: visits still settle and still archive, and the field is re-announced
@@ -86,20 +106,47 @@ handle_call(stats, _From, State) ->
     {reply, #{residents => length(State#state.field),
               visits => State#state.visits,
               refused => State#state.refused,
+              ignored => State#state.ignored,
               archived => visit_archive:genome_count(State#state.archive_dir),
               journal => visit_archive:journal_count(State#state.archive_dir),
-              mesh => rumble_mesh:available()}, State};
+              mesh => rumble_mesh:available(),
+              %% A live subscription is the difference between a service that can
+              %% hear a visitor and one that only looks like it can.
+              subscribed => State#state.sub =/= undefined}, State};
 handle_call(_Other, _From, State) -> {reply, {error, unknown_call}, State}.
 
 handle_cast(_Msg, State) -> {noreply, State}.
 
-%% A genome arriving over the mesh. Fire and forget from the sender's view: the
-%% row goes back as a published fact, not as a reply, because the sender may be
-%% gone by the time a 6,400-match row is finished.
-handle_info({macula, _Topic, Bytes}, State) when is_binary(Bytes) ->
-    {_Reply, State2} = visit(Bytes, State),
-    {noreply, State2};
-handle_info(_Other, State) -> {noreply, State}.
+%% A CHALLENGE ARRIVING OVER THE MESH. The shape is macula's own:
+%% {macula_event, SubRef, Topic, Payload, Meta}. The first version matched
+%% {macula, Topic, Bytes}, which macula never sends, so every challenge would have
+%% fallen through to the catch-all and been discarded in silence. The shape is
+%% taken from macula_client.erl:924 rather than assumed.
+%%
+%% Fire and forget from the sender's view: the row comes back as a published fact,
+%% not as a reply, because the sender may be long gone by the time 6,400 matches
+%% are finished.
+handle_info({macula_event, _Ref, _Topic, Payload, _Meta}, State) ->
+    {noreply, challenged(Payload, State)};
+
+%% THE SUBSCRIPTION DIED. Without this the service keeps running, looks healthy,
+%% and receives nothing ever again, which is the quietest possible failure. There
+%% is no resubscribe loop yet and that is stated rather than implied: the count is
+%% surfaced in stats/0 so a dead subscription is visible from outside.
+handle_info({macula_event_gone, _Ref, _Reason}, State) ->
+    {noreply, State#state{sub = undefined}};
+
+handle_info(_Other, State) ->
+    {noreply, State#state{ignored = State#state.ignored + 1}}.
+
+%% THE CHALLENGE SHAPE IS A MAP, matching the facts this service publishes, so a
+%% visitor can add fields later without the meaning of the message changing.
+%% Anything else is counted rather than guessed at: accepting a bare binary too
+%% would mean two shapes with one meaning, which is how a contract stops being one.
+challenged(#{type := challenge, genome := Bytes}, State) when is_binary(Bytes) ->
+    element(2, visit(Bytes, State));
+challenged(_Other, State) ->
+    State#state{ignored = State#state.ignored + 1}.
 
 %%==============================================================================
 %% One visit, in the order that cannot lose a sample
