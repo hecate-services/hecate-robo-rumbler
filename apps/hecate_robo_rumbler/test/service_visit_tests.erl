@@ -23,11 +23,11 @@ setup() ->
     Dir = filename:join(["/tmp", "rumbler_service_test",
                          integer_to_list(erlang:unique_integer([positive]))]),
     os:putenv("HECATE_RUMBLE_ARCHIVE", Dir),
-    {ok, _} = hecate_robo_rumbler_service:start_link(),
+    {ok, _} = settle_visits_server:start_link(),
     Dir.
 
 cleanup(Dir) ->
-    gen_server:stop(hecate_robo_rumbler_service),
+    gen_server:stop(settle_visits_server),
     os:unsetenv("HECATE_RUMBLE_ARCHIVE"),
     file:del_dir_r(Dir).
 
@@ -36,20 +36,20 @@ cleanup(Dir) ->
 %% most interesting arrivals.
 archives_before_it_judges(Dir) ->
     Junk = <<"RG", 1:8, 2:16, 16:16, 5:16, 85:32, 0:(85 * 16)>>,
-    ?assertMatch({error, {rejected, _}}, hecate_robo_rumbler_service:settle(Junk)),
+    ?assertMatch({error, {rejected, _}}, settle_visits_server:settle(Junk)),
     ?assertEqual({ok, robo_genome:id(Junk)}, {ok, robo_genome:id(Junk)}),
     ?assert(visit_archive:has_genome(Dir, robo_genome:id(Junk))).
 
 a_good_visit_is_archived_journalled_and_returned(Dir) ->
-    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
-    {ok, Fact} = hecate_robo_rumbler_service:settle(P),
+    [#{packed := P} | _] = settle_visits_server:field(),
+    {ok, Fact} = settle_visits_server:settle(P),
     ?assertEqual(visit_settled, maps:get(type, Fact)),
     ?assert(visit_archive:has_genome(Dir, robo_genome:id(P))),
     {ok, Journal} = visit_archive:journal(Dir),
     ?assertMatch([{visit, _} | _], [E || {visit, _} = E <- Journal]).
 
 stats_report_the_truth(_Dir) ->
-    S = hecate_robo_rumbler_service:stats(),
+    S = settle_visits_server:stats(),
     ?assertEqual(40, maps:get(residents, S)),
     ?assert(maps:get(visits, S) >= 1),
     ?assert(maps:get(refused, S) >= 1),
@@ -75,34 +75,34 @@ mesh_message_shape_test_() ->
     end}.
 
 a_real_macula_event_is_handled(Dir) ->
-    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
-    Before = maps:get(visits, hecate_robo_rumbler_service:stats()),
-    hecate_robo_rumbler_service !
+    [#{packed := P} | _] = settle_visits_server:field(),
+    Before = maps:get(visits, settle_visits_server:stats()),
+    settle_visits_server !
         {macula_event, make_ref(), <<"rumble-scratch/challenge">>,
          #{type => challenge, genome => P}, #{}},
     %% A mesh-delivered visit is now genuinely ASYNCHRONOUS: a worker runs it and
     %% nobody is waiting. So this waits for the count to move rather than reading
     %% it immediately, which used to work only because the server blocked.
     ?assertEqual(ok, until(fun() ->
-        maps:get(visits, hecate_robo_rumbler_service:stats()) >= Before + 1 end)),
+        maps:get(visits, settle_visits_server:stats()) >= Before + 1 end)),
     ?assert(visit_archive:has_genome(Dir, robo_genome:id(P))).
 
 %% A payload that is not a challenge is COUNTED, not guessed at. Accepting a bare
 %% binary as well would mean two shapes with one meaning, which is how a contract
 %% stops being one.
 a_wrong_shaped_payload_is_counted_not_guessed_at() ->
-    Before = maps:get(ignored, hecate_robo_rumbler_service:stats()),
-    hecate_robo_rumbler_service !
+    Before = maps:get(ignored, settle_visits_server:stats()),
+    settle_visits_server !
         {macula_event, make_ref(), <<"t">>, <<"a bare binary">>, #{}},
-    hecate_robo_rumbler_service ! {macula_event, make_ref(), <<"t">>, #{type => gossip}, #{}},
-    ?assertEqual(Before + 2, maps:get(ignored, hecate_robo_rumbler_service:stats())).
+    settle_visits_server ! {macula_event, make_ref(), <<"t">>, #{type => gossip}, #{}},
+    ?assertEqual(Before + 2, maps:get(ignored, settle_visits_server:stats())).
 
 %% A DROPPED SUBSCRIPTION IS THE QUIETEST FAILURE THERE IS: the service keeps
 %% running, looks healthy, and never hears anything again. It must be visible from
 %% outside.
 a_dead_subscription_is_visible() ->
-    hecate_robo_rumbler_service ! {macula_event_gone, make_ref(), pool_closed},
-    ?assertEqual(false, maps:get(subscribed, hecate_robo_rumbler_service:stats())).
+    settle_visits_server ! {macula_event_gone, make_ref(), pool_closed},
+    ?assertEqual(false, maps:get(subscribed, settle_visits_server:stats())).
 
 %%==============================================================================
 %% The worker split: what it is actually for
@@ -119,12 +119,12 @@ worker_split_test_() ->
 %% arithmetic in handle_call, so a health check during a visit timed out. It must
 %% now answer promptly WHILE a battle is running, and report the battle.
 queries_answer_during_a_battle() ->
-    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
+    [#{packed := P} | _] = settle_visits_server:field(),
     Caller = self(),
-    spawn(fun() -> Caller ! {done, hecate_robo_rumbler_service:settle(P)} end),
+    spawn(fun() -> Caller ! {done, settle_visits_server:settle(P)} end),
     timer:sleep(500),
     T0 = erlang:monotonic_time(millisecond),
-    S = hecate_robo_rumbler_service:stats(),
+    S = settle_visits_server:stats(),
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     %% Answered promptly, not after the battle finished.
     ?assert(Elapsed < 1000),
@@ -136,10 +136,10 @@ queries_answer_during_a_battle() ->
 %% the health check and still serialised the battles. Two visits must overlap, so
 %% together they take materially less than twice one.
 two_visits_overlap() ->
-    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
-    ?assert(maps:get(concurrency_limit, hecate_robo_rumbler_service:stats()) >= 2),
-    One = timed(fun() -> hecate_robo_rumbler_service:settle(P) end),
-    Two = timed(fun() -> pmap(2, fun() -> hecate_robo_rumbler_service:settle(P) end) end),
+    [#{packed := P} | _] = settle_visits_server:field(),
+    ?assert(maps:get(concurrency_limit, settle_visits_server:stats()) >= 2),
+    One = timed(fun() -> settle_visits_server:settle(P) end),
+    Two = timed(fun() -> pmap(2, fun() -> settle_visits_server:settle(P) end) end),
     %% Serialised would be about 2x. Overlapping is well under.
     ?assert(Two < One * 17 div 10).
 
@@ -147,9 +147,9 @@ two_visits_overlap() ->
 %% so a dying worker must answer. Driven by killing the worker the service
 %% spawned, which is the only way to exercise the DOWN path honestly.
 a_crashed_worker_answers_its_caller() ->
-    [#{packed := P} | _] = hecate_robo_rumbler_service:field(),
+    [#{packed := P} | _] = settle_visits_server:field(),
     Caller = self(),
-    spawn(fun() -> Caller ! {result, hecate_robo_rumbler_service:settle(P)} end),
+    spawn(fun() -> Caller ! {result, settle_visits_server:settle(P)} end),
     timer:sleep(300),
     kill_a_worker(),
     receive
@@ -165,7 +165,7 @@ a_crashed_worker_answers_its_caller() ->
 %% not link, so it killed whatever unrelated process happened to be there: the
 %% eunit runner. A test that takes out its own harness is not a test.
 kill_a_worker() ->
-    [exit(P, kill) || P <- maps:get(running_pids, hecate_robo_rumbler_service:stats())],
+    [exit(P, kill) || P <- maps:get(running_pids, settle_visits_server:stats())],
     ok.
 
 %% Poll rather than sleep a fixed time: a fixed sleep is either flaky or slow, and

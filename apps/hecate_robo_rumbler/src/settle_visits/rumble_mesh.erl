@@ -82,6 +82,15 @@ guarded(F) ->
     catch _Class:_Reason -> unavailable
     end.
 
+%% AN ERROR TUPLE IS NOT A VALUE, AND THE FIRST VERSION TREATED IT AS ONE. The
+%% catch-all clause below used to accept anything, so hecate_om_identity:realm()
+%% returning {error, no_realm} became {ok, {error, no_realm}}: available/0
+%% reported TRUE with no realm, and that error tuple was handed to macula as the
+%% realm, which raised function_clause inside the subscribe. Booted against the
+%% live mesh this printed "mesh up: true" while the service could neither
+%% subscribe nor publish. A health signal that lies is worse than no health
+%% signal, and only a real boot exposed it.
 wrap(undefined) -> unavailable;
+wrap({error, _Why}) -> unavailable;
 wrap({ok, V}) -> {ok, V};
 wrap(V) -> {ok, V}.
