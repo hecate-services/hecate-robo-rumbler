@@ -173,6 +173,17 @@ accept(Who, Bytes, State) when is_binary(Bytes) ->
     %% a genome this service goes on to REFUSE is kept: a refusal is information
     %% about what people send, and the bytes cost 577.
     _ = visit_archive:put_genome(State#state.archive_dir, Bytes),
+    %% THE FIELD, AGAIN, BECAUSE A LATE SPECTATOR MISSED IT. The manifest was
+    %% announced only on (re)subscribe, so anyone who started watching afterwards
+    %% saw rows referencing a `field_id' they could not resolve and a roster panel
+    %% that never rendered. Observed: a spectator subscribed to all four topics,
+    %% received a visit and a duel, and held no field at all.
+    %%
+    %% Re-announcing per visit rather than on a timer keeps it self-limiting: it
+    %% costs one 40-resident manifest per visit, against a row that is far larger,
+    %% and it arrives in the context that makes it useful.
+    _ = rumble_mesh:publish(visit_facts:topic(field),
+                            visit_facts:field_published(State#state.field)),
     %% ANNOUNCE THE ARRIVAL BEFORE THE BATTLE, not after. A row lands thirteen
     %% seconds later and liveness cannot wait for it: a spectator should be able
     %% to say "someone is fighting right now" at the moment it becomes true.
