@@ -80,6 +80,27 @@ Send one yourself:
 
     scripts/visit.escript <genome-file>
 
+## Watch a duel
+
+    scripts/watch.escript  2001 2005 1 40      # in the terminal
+    scripts/render.escript 2001 2005 1 duel.html   # a shareable page
+
+A whole battle is **19 KB**: 234 frames of two tanks, bullets, headings and
+energy. The physics is **not** reimplemented in JavaScript, deliberately, because
+a second implementation would drift and would break the property everything here
+rests on. The Erlang engine computes every frame; the page only plays them back.
+
+That makes it a recording, and a recording that carries both genome ids, the start
+index and the engine id is **checkable**: anyone can regenerate the frames from
+those inputs and confirm them. A recording you cannot verify is a claim.
+
+**This is a first step, not the destination.** Watching one battle is not what
+made Robocode worth showing up for. That was the metagame between authors:
+publish a champion, study it, counter it, get countered. None of that loop exists
+yet, and no amount of rendering substitutes for it. What is missing is a way to
+make a tank, opponents returned with your row so you have something to train
+against, and a ladder that remembers.
+
 ## Status
 
 **v1, and honest about it.** No ranking, no ledger, no verifier, no commit-reveal,
