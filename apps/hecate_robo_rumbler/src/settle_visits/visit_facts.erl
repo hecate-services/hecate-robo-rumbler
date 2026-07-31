@@ -156,18 +156,24 @@ duel_featured(Row, Field, ChallengerBytes) ->
 pick([], _Field, _Bytes) -> none;
 pick(Duels, Field, Bytes) -> featured(most_contested(Duels), Field, Bytes).
 
-%% The longest battle across the whole row. Longest is a proxy for closest: a
-%% fight that runs is one neither side finished quickly. Deterministic, so the
-%% featured duel is reproducible from the same inputs.
+%% The best battle across the whole row: DECIDED FIRST, longest second.
+%%
+%% Ranking by length alone does not find the closest fight, it finds the most
+%% stalemated one, because a battle that reaches the turn cap is by definition
+%% the longest there can be. Both ranks had this bug and fixing only the
+%% per-pairing one would have left it here: a capped battle from any pairing
+%% would still have beaten every decided battle in the row.
+%%
+%% Deterministic, so the featured duel is reproducible from the same inputs.
 most_contested(Duels) ->
-    Scored = [{maps:get(turns, L, 0), D, L}
+    Scored = [{maps:get(decided, L, false), maps:get(turns, L, 0), D, L}
               || D <- Duels, (L = maps:get(longest, D, none)) =/= none],
-    top(lists:reverse(lists:sort(fun by_turns/2, Scored))).
+    top(lists:reverse(lists:sort(fun by_quality/2, Scored))).
 
-by_turns({T1, _D1, _L1}, {T2, _D2, _L2}) -> T1 =< T2.
+by_quality({D1, T1, _, _}, {D2, T2, _, _}) -> {D1, T1} =< {D2, T2}.
 
 top([]) -> none;
-top([{_T, D, L} | _Rest]) -> {D, L}.
+top([{_Decided, _T, D, L} | _Rest]) -> {D, L}.
 
 featured(none, _Field, _Bytes) -> none;
 featured({Duel, Longest}, Field, Bytes) ->
@@ -193,7 +199,11 @@ carry(Bytes, Longest, Field, [#{packed := RPacked, seed := Seed, arm := Arm} | _
       start_split => <<"heldout">>,
       start_index => maps:get(start_index, Longest),
       challenger_seat => atom_to_binary(maps:get(seat, Longest), utf8),
-      turns => maps:get(turns, Longest)}.
+      turns => maps:get(turns, Longest),
+      %% Whether this duel ENDED, or ran out the turn cap. A spectator deserves to
+      %% know before watching, and the selection prefers decided battles precisely
+      %% because a capped one is always the longest and would otherwise always win.
+      decided => maps:get(decided, Longest, false)}.
 
 %%==============================================================================
 %% visit_settled

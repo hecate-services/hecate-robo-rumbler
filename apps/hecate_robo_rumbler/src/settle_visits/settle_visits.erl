@@ -151,13 +151,32 @@ duel(Challenger, #{genome := Resident} = R, Starts) ->
 %% The most-contested battle of a pairing: {StartIndex, Seat, Turns}. Seat is
 %% first or second, naming which side the CHALLENGER took, because the two seats
 %% are different geometries and a featured duel has to name which one it was.
+%%
+%% DECIDED FIRST, LONGEST SECOND, AND THE ORDER IS THE WHOLE POINT. Sorting by
+%% turns alone does not find the closest fight, it finds the most stalemated one:
+%% a battle that reaches the turn cap is by definition the longest there can be,
+%% so the featured duel was ALWAYS a 2000-turn standoff whenever any pairing
+%% capped. The first live row proved it, picking a cap out of 6,400 battles of
+%% which only 24 were draws. Two tanks circling each other for two thousand turns
+%% is the least watchable thing this service can produce, and it was going to be
+%% the one thing a visitor saw.
+%%
+%% So a battle with a WINNER outranks any capped one, and length breaks ties
+%% within that. A row where nothing at all was decided still features its longest
+%% battle rather than nothing, because a stalemate is at least the truth about
+%% that pairing.
 longest(Pairs) ->
-    All = [{maps:get(turns, O, 0), I, seat_of_index(N)}
+    All = [{decided(O), maps:get(turns, O, 0), I, seat_of_index(N)}
            || {I, Os} <- Pairs, {N, O} <- lists:zip([1, 2], Os)],
     best(lists:reverse(lists:sort(All))).
 
+%% `true' sorts above `false', so a decided battle wins the sort outright.
+decided(O) -> maps:get(capped, O, false) =:= false andalso
+              maps:get(result, O, unplayable) =/= unplayable.
+
 best([]) -> none;
-best([{Turns, I, Seat} | _]) -> #{start_index => I, seat => Seat, turns => Turns}.
+best([{Decided, Turns, I, Seat} | _]) ->
+    #{start_index => I, seat => Seat, turns => Turns, decided => Decided}.
 
 seat_of_index(1) -> first;
 seat_of_index(2) -> second.

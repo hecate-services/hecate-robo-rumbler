@@ -151,7 +151,12 @@ later: which engine, which wire format, which field, which start set. Rows carry
 only the `field_id` and a reader joins, so a row never hauls forty manifests.
 
 `duel_featured` carries **one battle worth watching**, and it carries genomes
-rather than frames. A visit is 6,400 battles of roughly 200 turns, about 1.28
+rather than frames. The battle chosen is the longest **decided** one, and that
+word is load-bearing: a battle that hits the turn cap is by definition the
+longest there can be, so ranking by length alone always featured a 2000-turn
+standoff. The first live row proved it, picking a cap out of 6,400 battles of
+which only 24 were draws. The fact carries `decided` so a spectator knows before
+watching. A visit is 6,400 battles of roughly 200 turns, about 1.28
 million frames and 93 MB. The two genomes and a start index are about 1.2 KB and
 say exactly the same thing, because the engine is deterministic: any spectator
 holding that fact regenerates every frame locally and gets the same battle, turn

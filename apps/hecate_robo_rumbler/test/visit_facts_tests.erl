@@ -166,3 +166,42 @@ order(<<"second">>, GC, GR) -> {GR, GC}.
 no_duels_means_no_fact_test() ->
     {ok, Field} = field(),
     ?assertEqual(none, visit_facts:duel_featured(#{duels => []}, Field, <<"x">>)).
+
+%% A CAPPED BATTLE IS ALWAYS THE LONGEST, so ranking by length alone always
+%% featured a 2000-turn standoff. The first live row proved it: 6,400 battles,
+%% only 24 of them draws, and the featured duel was a cap. A decided battle must
+%% outrank any capped one no matter how much shorter it is.
+featured_duel_prefers_a_decided_battle_test() ->
+    {ok, Field} = field(),
+    [A, B | _] = Field,
+    Row = #{duels => [pairing(A, capped(2000, 1)), pairing(B, ended(37, 2))]},
+    F = visit_facts:duel_featured(Row, Field, packed_of(A)),
+    ?assertEqual(37, maps:get(turns, F)),
+    ?assertEqual(2, maps:get(start_index, F)),
+    ?assert(maps:get(decided, F)),
+    %% And it featured B's pairing, not A's, which is the whole point: the
+    %% preference has to cross pairings, not merely order battles within one.
+    ?assertEqual(hex_id(B), maps:get(resident_id, F)).
+
+%% When NOTHING was decided the row still features its longest battle. A
+%% stalemate is at least the truth about that pairing, and showing nothing at all
+%% would hide it.
+all_capped_still_features_the_longest_test() ->
+    {ok, Field} = field(),
+    [A, B | _] = Field,
+    Row = #{duels => [pairing(A, capped(1500, 1)), pairing(B, capped(2000, 2))]},
+    F = visit_facts:duel_featured(Row, Field, packed_of(A)),
+    ?assertEqual(2000, maps:get(turns, F)),
+    ?assertNot(maps:get(decided, F)).
+
+pairing(Resident, Longest) -> #{resident => Resident, longest => Longest}.
+
+capped(Turns, Index) ->
+    #{start_index => Index, seat => first, turns => Turns, decided => false}.
+
+ended(Turns, Index) ->
+    #{start_index => Index, seat => first, turns => Turns, decided => true}.
+
+packed_of(#{packed := P}) -> P.
+
+hex_id(#{id := Id}) -> binary:encode_hex(Id).
