@@ -57,7 +57,21 @@ its place at ranked visits, and there is no ranking here yet.
 Done since: the archive (content-addressed, append-only, self-verifying on read),
 the published facts as an explicit flat schema, and a per-visit compute budget.
 
-Owed next: the mesh wiring itself, which is now the smallest remaining piece.
+The mesh is wired: `hecate_om:boot/2` supplies the pool and realm, the manifest is
+published once at boot, and a genome arriving on the topic settles a visit.
+
+**The order of operations is the design, and it is not the obvious one.** Archive
+the genome first, before it is even judged, because a visiting genome is a sample
+the research cannot otherwise obtain and everything after that step can fail
+without losing it. Then settle, then journal locally, then publish outward
+best-effort. A dark mesh costs a fact, never a sample. Even a REFUSED genome is
+kept, because a refusal is information about what people send and the bytes cost
+577.
+
+Owed next: migration. Today a visitor gets a row back and nothing else. What would
+close the loop is opponents: come home with genomes to train against, improve,
+return. That is phase 2 islands in the plan, and it is only possible because the
+archive keeps what arrives.
 
 ### Two facts
 

@@ -1,7 +1,8 @@
 {application, hecate_robo_rumbler, [
     {description, "Robo Rumble rumbler: accepts a visiting tank genome, fights it against the resident field, publishes the row"},
     {vsn, "0.1.0"},
-    {registered, []},
+    {registered, [hecate_robo_rumbler_service]},
+    {mod, {hecate_robo_rumbler_app, []}},
     {applications, [
         kernel,
         stdlib,
@@ -11,7 +12,9 @@
         %% (see the README): the robo_* modules are pure, while that application
         %% brings up a supervisor and a morphology registry a rumbler has no use
         %% for.
-        faber_tweann
+        faber_tweann,
+        %% Mesh SDK, realm identity, capabilities, health.
+        hecate_om
     ]},
     {env, []},
     {modules, []},
