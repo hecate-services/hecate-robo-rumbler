@@ -48,6 +48,32 @@ full ladder. Real and diverse, and not a random draw from the space of tanks. Th
 caveat travels on the wire with every result, because a qualifier that lives only
 in a README is a qualifier nobody sees.
 
+## It works
+
+First live rumble, 2026-07-31, over the deployed mesh via
+`station-de-frankfurt.macula.io`:
+
+    visitor  : 577 bytes
+    listening: rumble-scratch/visit
+    sent     : rumble-scratch/challenge
+
+    === ROW ===
+    opponents : 40
+    matches   : 6400
+    won       : 2400
+    lost      : 3840
+    drawn     : 160
+    turn-cap  : 0
+
+The 160 draws are the internal check: the visitor was resident 2001, so it meets
+itself once in the field and every one of those 160 matches must draw. And
+turn-cap 0 across 6,400 matches is the measured start set earning its place, since
+the geometry it replaced produced censored stalemates in 70 percent of matches.
+
+Send one yourself:
+
+    scripts/visit.escript <genome-file>
+
 ## Status
 
 **v1, and honest about it.** No ranking, no ledger, no verifier, no commit-reveal,
