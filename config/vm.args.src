@@ -1,0 +1,10 @@
+## Node identity and runtime flags for hecate_robo_rumbler.
+-name ${HECATE_NODE_NAME}@${HECATE_NODE_HOST}
+-setcookie ${HECATE_COOKIE}
+
++K true
+## Battles are CPU-bound and run in spawned workers, bounded by the scheduler
+## count. The async thread pool is not on that path; the schedulers are.
++A 8
+
+-env ERL_CRASH_DUMP /var/lib/hecate-robo-rumbler/erl_crash.dump

@@ -1,0 +1,19 @@
+%% Substituted by relx at boot; every ${VAR} must resolve or the node will not
+%% start with a malformed term, which is the correct failure: a rumbler with a
+%% half-configured realm would publish rows nobody can attribute.
+[
+    {hecate_om, [
+        {service_cert_path, "/etc/hecate/secrets/service-cert.pem"},
+        {station_socket,    "/run/macula/station.sock"},
+        {health_port,       ${HECATE_HEALTH_PORT}},
+        {capability_topic,  <<"_mesh.cap.">>},
+        %% THE REALM IS AN APPLICATION ENV, NOT A SHELL VARIABLE, and this file is
+        %% the only place the two meet. Booting by hand against the live mesh cost
+        %% an hour on exactly this: HECATE_REALM was exported and
+        %% hecate_om_identity:realm() still answered no_realm, because it reads
+        %% application:get_env(hecate_om, realm) and nothing was translating.
+        {realm,             <<"${HECATE_REALM}">>}
+    ]},
+
+    {kernel, [{logger_level, info}]}
+].
