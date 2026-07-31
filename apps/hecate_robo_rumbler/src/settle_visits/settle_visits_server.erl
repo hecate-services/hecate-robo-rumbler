@@ -173,6 +173,11 @@ accept(Who, Bytes, State) when is_binary(Bytes) ->
     %% a genome this service goes on to REFUSE is kept: a refusal is information
     %% about what people send, and the bytes cost 577.
     _ = visit_archive:put_genome(State#state.archive_dir, Bytes),
+    %% ANNOUNCE THE ARRIVAL BEFORE THE BATTLE, not after. A row lands thirteen
+    %% seconds later and liveness cannot wait for it: a spectator should be able
+    %% to say "someone is fighting right now" at the moment it becomes true.
+    _ = rumble_mesh:publish(visit_facts:topic(arrival),
+                            visit_facts:visit_started(Bytes, State#state.field)),
     dispatch(Who, Bytes, State);
 accept(Who, _NotBytes, State) ->
     answer(Who, {error, not_a_binary}),
@@ -184,7 +189,7 @@ dispatch(Who, Bytes, #state{running = R, limit = L} = State) when map_size(R) >=
     State#state{waiting = State#state.waiting ++ [{Who, Bytes}]};
 dispatch(Who, Bytes, State) ->
     {Pid, Ref} = spawn_worker(Bytes, State#state.field),
-    State#state{running = maps:put(Pid, {Ref, Who}, State#state.running)}.
+    State#state{running = maps:put(Pid, {Ref, Who, Bytes}, State#state.running)}.
 
 %% THE WORKER IS PURE. No state, no disk, no publishing: immutable inputs in, one
 %% message out. That is what makes running several at once safe, and it is why
@@ -202,11 +207,11 @@ finish(Pid, Result, #state{running = R} = State) ->
 
 %% Not ours, or already finished. Neither is an error.
 completed(undefined, _Pid, _Result, State) -> State;
-completed({Ref, Who}, Pid, Result, #state{running = R} = State) ->
+completed({Ref, Who, Bytes}, Pid, Result, #state{running = R} = State) ->
     %% Demonitor with flush, so the DOWN that follows a normal exit never arrives
     %% to be mistaken for a crash.
     true = erlang:demonitor(Ref, [flush]),
-    {Reply, State2} = record(Result, State),
+    {Reply, State2} = record(Result, Bytes, State),
     answer(Who, Reply),
     next(State2#state{running = maps:remove(Pid, R)}).
 
@@ -217,18 +222,30 @@ completed({Ref, Who}, Pid, Result, #state{running = R} = State) ->
 %% shapes and only one of them is a contract. The first version of this refactor
 %% returned the row, so a caller silently began receiving a different structure
 %% than the mesh does. A test caught it; nothing else would have.
-record({error, _Why} = E, State) -> {E, State#state{refused = State#state.refused + 1}};
-record({ok, Row}, State) ->
+record({error, _Why} = E, _Bytes, State) ->
+    {E, State#state{refused = State#state.refused + 1}};
+record({ok, Row}, Bytes, State) ->
     Fact = visit_facts:visit_settled(Row, State#state.field),
     _ = visit_archive:append(State#state.archive_dir, {visit, Fact}),
     _ = rumble_mesh:publish(visit_facts:topic(visit), Fact),
+    _ = feature(Row, Bytes, State),
     {{ok, Fact}, State#state{visits = State#state.visits + 1}}.
+
+%% ONE WATCHABLE DUEL PER VISIT. Journalled as well as published, so the featured
+%% duel survives a dark mesh and stays reproducible from the archive alone.
+feature(Row, Bytes, State) ->
+    published(visit_facts:duel_featured(Row, State#state.field, Bytes), State).
+
+published(none, _State) -> ok;
+published(Fact, State) ->
+    _ = visit_archive:append(State#state.archive_dir, {duel, Fact}),
+    rumble_mesh:publish(visit_facts:topic(duel), Fact).
 
 died(Pid, Reason, #state{running = R} = State) ->
     dead(maps:get(Pid, R, undefined), Pid, Reason, State).
 
 dead(undefined, _Pid, _Reason, State) -> State;
-dead({_Ref, Who}, Pid, Reason, #state{running = R} = State) ->
+dead({_Ref, Who, _Bytes}, Pid, Reason, #state{running = R} = State) ->
     answer(Who, {error, {battle_crashed, Reason}}),
     next(State#state{running = maps:remove(Pid, R),
                      crashed = State#state.crashed + 1}).

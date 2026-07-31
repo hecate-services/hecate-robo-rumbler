@@ -127,8 +127,16 @@ duel(Challenger, R) -> duel(Challenger, R, robo_starts:split(heldout)).
 -spec duel({[non_neg_integer()], [integer()]}, resident_field:resident(),
            [robo_starts:start()]) -> map().
 duel(Challenger, #{genome := Resident} = R, Starts) ->
-    Outcomes = lists:append([both_seats(Challenger, Resident, S) || S <- Starts]),
+    Indexed = lists:zip(lists:seq(1, length(Starts)), Starts),
+    Pairs = [{I, both_seats(Challenger, Resident, S)} || {I, S} <- Indexed],
+    Outcomes = lists:append([O || {_I, O} <- Pairs]),
     #{resident => resident_field:describe(R),
+      %% THE LONGEST BATTLE OF THIS PAIRING, kept so one duel can be featured for
+      %% a spectator. Longest is a proxy for closest: a fight that runs is a fight
+      %% neither side finished quickly. Deterministic (first maximum wins), so the
+      %% featured duel is reproducible from the same inputs rather than a matter
+      %% of who looked.
+      longest => longest(Pairs),
       matches => length(Outcomes),
       wins => count(win, Outcomes),
       losses => count(loss, Outcomes),
@@ -139,6 +147,20 @@ duel(Challenger, #{genome := Resident} = R, Starts) ->
       %% share is far above that is describing a stalemate regime rather than a
       %% skill difference, and a reader must be able to see which.
       capped => count(capped, Outcomes)}.
+
+%% The most-contested battle of a pairing: {StartIndex, Seat, Turns}. Seat is
+%% first or second, naming which side the CHALLENGER took, because the two seats
+%% are different geometries and a featured duel has to name which one it was.
+longest(Pairs) ->
+    All = [{maps:get(turns, O, 0), I, seat_of_index(N)}
+           || {I, Os} <- Pairs, {N, O} <- lists:zip([1, 2], Os)],
+    best(lists:reverse(lists:sort(All))).
+
+best([]) -> none;
+best([{Turns, I, Seat} | _]) -> #{start_index => I, seat => Seat, turns => Turns}.
+
+seat_of_index(1) -> first;
+seat_of_index(2) -> second.
 
 %% The start is asymmetric, so the two seats are two genuinely different
 %% geometries rather than one battle rotated.

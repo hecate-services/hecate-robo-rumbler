@@ -137,17 +137,35 @@ close the loop is opponents: come home with genomes to train against, improve,
 return. That is phase 2 islands in the plan, and it is only possible because the
 archive keeps what arrives.
 
-### Two facts
+### Four facts
 
 `field_published` carries the manifest, once per field version: every resident id,
 arm and seed, plus a `field_id` derived by hashing the sorted resident ids.
+
+`visit_started` is emitted the moment a genome is archived, BEFORE it is judged.
+A row lands about thirteen seconds later and liveness cannot wait for it: a
+spectator has to be able to say "someone is fighting right now" while it is true.
 
 `visit_settled` carries the row and four identities that make it reconstructible
 later: which engine, which wire format, which field, which start set. Rows carry
 only the `field_id` and a reader joins, so a row never hauls forty manifests.
 
+`duel_featured` carries **one battle worth watching**, and it carries genomes
+rather than frames. A visit is 6,400 battles of roughly 200 turns, about 1.28
+million frames and 93 MB. The two genomes and a start index are about 1.2 KB and
+say exactly the same thing, because the engine is deterministic: any spectator
+holding that fact regenerates every frame locally and gets the same battle, turn
+for turn. The battle chosen is the longest across the row, longest being a proxy
+for closest fought. A test asserts the regenerated battle matches the turn count
+the rumbler counted, because a fact that cannot be replayed is decoration.
+
 No tuples on the wire, atom keys only, ids as hex. Each of those is a rule earned
 by something that broke elsewhere.
+
+**`duel_featured` republishes a visitor's genome.** That is a deliberate
+disclosure, not an accident: send a tank here and its bytes may be broadcast to
+anyone watching. Said plainly because a visitor cannot infer it from "submit a
+genome, get a row back".
 
 ### Two different limits
 

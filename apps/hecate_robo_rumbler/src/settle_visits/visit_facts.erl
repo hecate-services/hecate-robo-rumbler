@@ -31,7 +31,8 @@
 %% per field version rather than repeated in every row.
 -module(visit_facts).
 
--export([field_published/1, visit_settled/2, field_id/1, topic/1]).
+-export([field_published/1, visit_started/2, visit_settled/2,
+         duel_featured/3, field_id/1, topic/1]).
 
 %% The schema version of the FACTS, which is not the wire version of a genome.
 %% They change for different reasons and conflating them would force a needless
@@ -45,11 +46,16 @@
 %% A SCRATCH NAMESPACE UNTIL SOMEONE DECIDES OTHERWISE. Publishing is visible to
 %% whatever is subscribed, so the default is deliberately not a shared society
 %% feed. Override with HECATE_RUMBLE_NS.
--spec topic(field | visit | challenge) -> binary().
+-spec topic(field | visit | challenge | arrival | duel) -> binary().
 topic(What) -> <<(namespace())/binary, "/", (leaf(What))/binary>>.
 
 leaf(field) -> <<"field">>;
 leaf(visit) -> <<"visit">>;
+%% Arrivals, separate from results, so a spectator wanting liveness does not have
+%% to subscribe to every settled row to learn that something is happening.
+leaf(arrival) -> <<"arrival">>;
+%% One watchable duel per visit, carrying the genomes rather than frames.
+leaf(duel) -> <<"duel">>;
 %% Where a visitor sends a tank. Separate from where results go, so a subscriber
 %% wanting results does not also receive every challenge.
 leaf(challenge) -> <<"challenge">>.
@@ -102,6 +108,92 @@ arm_counts(P) ->
 field_id(Field) ->
     Ids = lists:sort([Id || #{id := Id} <- Field]),
     hex(crypto:hash(sha256, iolist_to_binary(Ids))).
+
+%%==============================================================================
+%% visit_started
+%%
+%% A CHALLENGER HAS ARRIVED AND IS FIGHTING NOW. Tiny, one per visit, published
+%% before the battle rather than after, because the whole point is that a site can
+%% say "someone is fighting right now" at the moment it becomes true. A row
+%% arrives thirteen seconds later; liveness cannot wait for it.
+%%==============================================================================
+
+-spec visit_started(binary(), [resident_field:resident()]) -> map().
+visit_started(ChallengerBytes, Field) ->
+    #{type => visit_started,
+      fact_version => ?FACT_VERSION,
+      challenger_id => hex(robo_genome:id(ChallengerBytes)),
+      field_id => field_id(Field),
+      opponents => length(Field)}.
+
+%%==============================================================================
+%% duel_featured
+%%
+%% ONE WATCHABLE BATTLE PER VISIT, AND IT CARRIES GENOMES RATHER THAN FRAMES.
+%%
+%% A visit is 6,400 battles of roughly 200 turns: about 1.28 MILLION frames, some
+%% 93 MB, produced in the thirteen seconds the row takes. That is a firehose on a
+%% shared realm, for one visitor. And a battle computes in about two milliseconds,
+%% so there is no real time to stream: anything a person watches is a replay
+%% slowed to human speed either way.
+%%
+%% Since the engine is deterministic, measured byte-identical across two machines,
+%% the two genomes and a start index ARE the frames, compressed about sixty to
+%% one. A spectator regenerates them by calling the same engine. Publishing frames
+%% would ship 17 KB to convey what 1.2 KB conveys exactly, and would make watching
+%% depend on the rumbler having published rather than on anyone being able to
+%% replay a battle they can name.
+%%
+%% THIS REPUBLISHES A VISITOR'S GENOME and that is a real disclosure, not a
+%% detail. A sender must be told before they send, because "we ran your tank" and
+%% "we published your tank for anyone to study and counter" are different deals.
+%%==============================================================================
+
+-spec duel_featured(map(), [resident_field:resident()], binary()) -> map() | none.
+duel_featured(Row, Field, ChallengerBytes) ->
+    pick(maps:get(duels, Row, []), Field, ChallengerBytes).
+
+pick([], _Field, _Bytes) -> none;
+pick(Duels, Field, Bytes) -> featured(most_contested(Duels), Field, Bytes).
+
+%% The longest battle across the whole row. Longest is a proxy for closest: a
+%% fight that runs is one neither side finished quickly. Deterministic, so the
+%% featured duel is reproducible from the same inputs.
+most_contested(Duels) ->
+    Scored = [{maps:get(turns, L, 0), D, L}
+              || D <- Duels, (L = maps:get(longest, D, none)) =/= none],
+    top(lists:reverse(lists:sort(fun by_turns/2, Scored))).
+
+by_turns({T1, _D1, _L1}, {T2, _D2, _L2}) -> T1 =< T2.
+
+top([]) -> none;
+top([{_T, D, L} | _Rest]) -> {D, L}.
+
+featured(none, _Field, _Bytes) -> none;
+featured({Duel, Longest}, Field, Bytes) ->
+    Rid = maps:get(id, maps:get(resident, Duel)),
+    carry(Bytes, Longest, Field, [R || #{id := I} = R <- Field, I =:= Rid]).
+
+carry(_Bytes, _Longest, _Field, []) -> none;
+carry(Bytes, Longest, Field, [#{packed := RPacked, seed := Seed, arm := Arm} | _]) ->
+    #{type => duel_featured,
+      fact_version => ?FACT_VERSION,
+      field_id => field_id(Field),
+      engine_id => hex(robo_rumble:engine_id()),
+      wire_version => maps:get(wire_version, robo_genome:limits()),
+      %% Everything a spectator needs to regenerate every frame, and nothing else.
+      challenger_id => hex(robo_genome:id(Bytes)),
+      challenger_genome => base64:encode(Bytes),
+      resident_id => hex(robo_genome:id(RPacked)),
+      resident_genome => base64:encode(RPacked),
+      resident_arm => atom_to_binary(Arm, utf8),
+      resident_seed => Seed,
+      %% Which of the 80 held-out geometries, and which side the challenger took.
+      %% Both are needed: the two seats are different geometries, not one mirrored.
+      start_split => <<"heldout">>,
+      start_index => maps:get(start_index, Longest),
+      challenger_seat => atom_to_binary(maps:get(seat, Longest), utf8),
+      turns => maps:get(turns, Longest)}.
 
 %%==============================================================================
 %% visit_settled

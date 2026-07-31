@@ -127,7 +127,7 @@ path(Dir, Id) ->
 %% this host reads it, so the cross-release byte-stability problem that forced
 %% robo_genome to hand-roll its packing does not apply here.
 -spec append(file:filename_all(), {field | visit, term()}) -> ok | {error, term()}.
-append(Dir, {Kind, _Payload} = Entry) when Kind =:= field; Kind =:= visit ->
+append(Dir, {Kind, _Payload} = Entry) when Kind =:= field; Kind =:= visit; Kind =:= duel ->
     Path = filename:join(Dir, ?JOURNAL),
     ok = filelib:ensure_dir(Path),
     file:write_file(Path, io_lib:format("~p.~n", [Entry]), [append]);

@@ -103,3 +103,66 @@ keys_are_atoms(M) when is_map(M) ->
         andalso lists:all(fun keys_are_atoms/1, maps:values(M));
 keys_are_atoms(L) when is_list(L) -> lists:all(fun keys_are_atoms/1, L);
 keys_are_atoms(_Other) -> true.
+
+%%==============================================================================
+%% visit_started and duel_featured
+%%==============================================================================
+
+%% Published BEFORE the battle, so it has to be derivable from the bytes alone.
+arrival_needs_only_the_bytes_test() ->
+    {ok, Field} = field(),
+    #{packed := P} = hd(Field),
+    F = visit_facts:visit_started(P, Field),
+    ?assertEqual(visit_started, maps:get(type, F)),
+    ?assertEqual(robo_genome:id(P), binary:decode_hex(maps:get(challenger_id, F))),
+    ?assertEqual(visit_facts:field_id(Field), maps:get(field_id, F)),
+    ?assertNot(has_tuple(F)).
+
+%% THE WHOLE POINT: it carries GENOMES, not frames, and everything needed to
+%% regenerate every frame. A visit is 6,400 battles of ~200 turns, about 1.28
+%% million frames and 93 MB; the two genomes and a start index are ~1.2 KB and
+%% say exactly the same thing because the engine is deterministic.
+featured_duel_carries_enough_to_replay_test() ->
+    {ok, Field} = field(),
+    Small = lists:sublist(Field, 3),
+    #{packed := P} = hd(Small),
+    {ok, Row} = settle_visits:settle(P, Small),
+    F = visit_facts:duel_featured(Row, Small, P),
+    ?assertEqual(duel_featured, maps:get(type, F)),
+    %% Both genomes, and they must round-trip back into real genomes.
+    ?assertMatch({ok, _}, robo_genome:unpack(base64:decode(maps:get(challenger_genome, F)))),
+    ?assertMatch({ok, _}, robo_genome:unpack(base64:decode(maps:get(resident_genome, F)))),
+    %% Which geometry, and which side the challenger took. Both are needed: the
+    %% two seats are different geometries, not one mirrored.
+    ?assertEqual(<<"heldout">>, maps:get(start_split, F)),
+    ?assert(maps:get(start_index, F) >= 1),
+    ?assert(lists:member(maps:get(challenger_seat, F), [<<"first">>, <<"second">>])),
+    %% And the identities that make the replay checkable.
+    [?assert(maps:is_key(K, F)) || K <- [engine_id, wire_version, field_id]],
+    ?assertNot(has_tuple(F)),
+    ?assert(keys_are_atoms(F)).
+
+%% A REPLAY REGENERATED FROM THE FACT MUST MATCH WHAT THE RUMBLER COUNTED, or the
+%% fact is decoration. This is the property the whole no-frames decision rests on.
+featured_duel_replays_to_the_same_battle_test() ->
+    {ok, Field} = field(),
+    Small = lists:sublist(Field, 3),
+    #{packed := P} = hd(Small),
+    {ok, Row} = settle_visits:settle(P, Small),
+    F = visit_facts:duel_featured(Row, Small, P),
+    {ok, GC} = robo_genome:unpack(base64:decode(maps:get(challenger_genome, F))),
+    {ok, GR} = robo_genome:unpack(base64:decode(maps:get(resident_genome, F))),
+    Start = lists:nth(maps:get(start_index, F), robo_starts:split(heldout)),
+    {AX, AY, AH, BX, BY, BH} = Start,
+    Placement = [{AX, AY, AH}, {BX, BY, BH}],
+    {First, Second} = order(maps:get(challenger_seat, F), GC, GR),
+    {ok, R} = robo_rumble:battle([{first, {genome, First}}, {second, {genome, Second}}],
+                                 #{placement => Placement}),
+    ?assertEqual(maps:get(turns, F), maps:get(turns, R)).
+
+order(<<"first">>, GC, GR) -> {GC, GR};
+order(<<"second">>, GC, GR) -> {GR, GC}.
+
+no_duels_means_no_fact_test() ->
+    {ok, Field} = field(),
+    ?assertEqual(none, visit_facts:duel_featured(#{duels => []}, Field, <<"x">>)).
